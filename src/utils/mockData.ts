@@ -25,6 +25,9 @@ export const BAYS: Bay[] = Array.from({ length: 7 }, (_, index) => ({
   rows: 8,
   tiers: 6,
   maxStackWeight: index < 2 ? 105 : 88,
+  // 插口总数按贝位奇偶取 4/6，其中 02、10 贝各有 1 个检修停用
+  powerSockets: index % 2 === 0 ? 4 : 6,
+  powerSocketsOutOfService: index === 0 || index === 4 ? 1 : 0,
 }));
 
 export const VESSEL: VesselSpec = {
@@ -130,6 +133,8 @@ export function createInitialPlans(): StowagePlan[] {
       createdAt: '2026-10-06T02:20:00.000Z',
       updatedAt: '2026-10-06T03:45:00.000Z',
       placements: primary,
+      reeferPower: [],
+      powerWaitQueue: [],
     },
     {
       id: 'PLAN-B',
@@ -139,6 +144,8 @@ export function createInitialPlans(): StowagePlan[] {
       createdAt: '2026-10-06T03:48:00.000Z',
       updatedAt: '2026-10-06T04:10:00.000Z',
       placements: portOptimized,
+      reeferPower: [],
+      powerWaitQueue: [],
     },
   ];
 }

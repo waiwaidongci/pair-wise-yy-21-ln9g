@@ -11,13 +11,17 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { BayCanvas } from '../components/BayCanvas';
 import type { BayCanvasHandle } from '../components/BayCanvas';
+import { BaySocketDialog } from '../components/BaySocketDialog';
 import { CargoPool } from '../components/CargoPool';
 import { ConflictList } from '../components/ConflictList';
+import { ReeferPowerPanel } from '../components/ReeferPowerPanel';
+import { ReleasePrintDialog } from '../components/ReleasePrintDialog';
 import { StabilityDashboard } from '../components/StabilityDashboard';
 import { plannerActions } from '../stores/plannerSlice';
 import { useAppDispatch, useAppSelector } from '../stores/hooks';
-import type { Placement, Slot, StowageConflict } from '../types/shipping';
+import type { Bay, Placement, Slot, StowageConflict } from '../types/shipping';
 import { downloadManifest } from '../utils/exporters';
+import { createOperationId } from '../utils/persistence';
 import { calculateStability } from '../utils/stability';
 import { findAutoStowPlacements } from '../utils/stowage';
 import { validateStowage } from '../utils/stowageRules';
@@ -28,6 +32,8 @@ export function PlannerPage() {
   const planner = useAppSelector((state) => state.planner);
   const canvasRef = useRef<BayCanvasHandle>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [releaseOpen, setReleaseOpen] = useState(false);
+  const [socketBay, setSocketBay] = useState<Bay | null>(null);
   const activePlan = planner.plans.find((plan) => plan.id === planner.activePlanId) ?? planner.plans[0];
   const stability = useMemo(
     () =>
@@ -36,20 +42,38 @@ export function PlannerPage() {
         : null,
     [activePlan, planner.containers, planner.bays, planner.vessel],
   );
+  const reeferPower = activePlan?.reeferPower ?? [];
+  const powerWaitQueue = activePlan?.powerWaitQueue ?? [];
   const conflicts = useMemo(
     () =>
       activePlan && stability
-        ? validateStowage(activePlan.placements, planner.containers, planner.bays, planner.ports, stability)
+        ? validateStowage(
+            activePlan.placements,
+            planner.containers,
+            planner.bays,
+            planner.ports,
+            stability,
+            reeferPower,
+          )
         : [],
-    [activePlan, planner.containers, planner.bays, planner.ports, stability],
+    [activePlan, stability, planner.containers, planner.bays, planner.ports, reeferPower],
   );
   const selectedPlacement = useMemo(() => {
     if (!activePlan || !planner.selectedContainerId) return null;
-    return activePlan.placements.find((placement) => placement.containerId === planner.selectedContainerId) ?? null;
+    return (
+      activePlan.placements.find((placement) => placement.containerId === planner.selectedContainerId) ??
+      null
+    );
   }, [activePlan, planner.selectedContainerId]);
   const unplacedCount = activePlan
     ? planner.containers.length - activePlan.placements.length
     : planner.containers.length;
+  const queuedCount = powerWaitQueue.length;
+  const pluggedCount = reeferPower.filter((info) => info.state === 'plugged').length;
+  const totalSockets = planner.bays.reduce(
+    (sum, bay) => sum + Math.max(0, bay.powerSockets - bay.powerSocketsOutOfService),
+    0,
+  );
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -57,11 +81,16 @@ export function PlannerPage() {
       if (target.matches('input, textarea, [contenteditable="true"]')) return;
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
         event.preventDefault();
-        if (event.shiftKey) dispatch(plannerActions.redo());
-        else dispatch(plannerActions.undo());
+        if (event.shiftKey) dispatch(plannerActions.redo({ operationId: createOperationId() }));
+        else dispatch(plannerActions.undo({ operationId: createOperationId() }));
       }
       if ((event.key === 'Delete' || event.key === 'Backspace') && selectedPlacement) {
-        dispatch(plannerActions.removePlacement(selectedPlacement.id));
+        dispatch(
+          plannerActions.removePlacement({
+            placementId: selectedPlacement.id,
+            operationId: createOperationId(),
+          }),
+        );
       }
     }
     window.addEventListener('keydown', handleKeyDown);
@@ -73,7 +102,15 @@ export function PlannerPage() {
   }
 
   function assignContainer(containerId: string, slot: Slot) {
-    dispatch(plannerActions.assignContainer({ containerId, slot }));
+    dispatch(
+      plannerActions.assignContainer({ containerId, slot, operationId: createOperationId() }),
+    );
+  }
+
+  function removePlacement(placementId: string) {
+    dispatch(
+      plannerActions.removePlacement({ placementId, operationId: createOperationId() }),
+    );
   }
 
   function selectPlacement(placement: Placement) {
@@ -90,10 +127,12 @@ export function PlannerPage() {
   function handleAutoStow() {
     const newPlacements = findAutoStowPlacements(
       planner.containers,
-      activePlan.placements,
+      activePlan!.placements,
       planner.bays,
     );
-    dispatch(plannerActions.autoStow(newPlacements));
+    dispatch(
+      plannerActions.autoStow({ placements: newPlacements, operationId: createOperationId() }),
+    );
   }
 
   function focusConflict(conflict: StowageConflict) {
@@ -104,16 +143,42 @@ export function PlannerPage() {
     dispatch(plannerActions.selectSlot(conflict.slot));
   }
 
-  function exportManifest() {
-    downloadManifest(activePlan, planner.containers, planner.ports, stability!);
+  function locateContainer(containerId: string) {
+    dispatch(plannerActions.selectContainer(containerId));
+    const placement = activePlan!.placements.find((candidate) => candidate.containerId === containerId);
+    if (placement) {
+      dispatch(
+        plannerActions.selectSlot({
+          bayId: placement.bayId,
+          row: placement.row,
+          tier: placement.tier,
+        }),
+      );
+    }
   }
 
-  const conflictIntent: Intent =
-    conflicts.some((conflict) => conflict.severity === 'danger')
-      ? 'danger'
-      : conflicts.length
-        ? 'warning'
-        : 'success';
+  function handleExportManifest() {
+    downloadManifest(
+      activePlan!,
+      planner.containers,
+      planner.ports,
+      stability!,
+      planner.bays,
+      reeferPower,
+      powerWaitQueue,
+    );
+  }
+
+  function handleConfirmRelease() {
+    setReleaseOpen(false);
+    window.print();
+  }
+
+  const conflictIntent: Intent = conflicts.some((conflict) => conflict.severity === 'danger')
+    ? 'danger'
+    : conflicts.length
+      ? 'warning'
+      : 'success';
 
   return (
     <div className="planner-page">
@@ -138,6 +203,10 @@ export function PlannerPage() {
           <strong>{unplacedCount}</strong>
         </div>
         <div className="toolbar-stat">
+          <small>待供电</small>
+          <strong className={queuedCount > 0 ? 'text-danger' : ''}>{queuedCount}</strong>
+        </div>
+        <div className="toolbar-stat">
           <small>异常项</small>
           <strong className={conflictIntent === 'danger' ? 'text-danger' : ''}>{conflicts.length}</strong>
         </div>
@@ -147,7 +216,7 @@ export function PlannerPage() {
             icon="undo"
             minimal
             disabled={planner.past.length === 0}
-            onClick={() => dispatch(plannerActions.undo())}
+            onClick={() => dispatch(plannerActions.undo({ operationId: createOperationId() }))}
           />
         </Tooltip>
         <Tooltip content="重做（⇧⌘Z）" compact>
@@ -155,7 +224,7 @@ export function PlannerPage() {
             icon="redo"
             minimal
             disabled={planner.future.length === 0}
-            onClick={() => dispatch(plannerActions.redo())}
+            onClick={() => dispatch(plannerActions.redo({ operationId: createOperationId() }))}
           />
         </Tooltip>
         <Divider />
@@ -165,7 +234,9 @@ export function PlannerPage() {
         <Button
           icon="duplicate"
           outlined
-          onClick={() => dispatch(plannerActions.duplicatePlan(activePlan.id))}
+          onClick={() =>
+            dispatch(plannerActions.duplicatePlan({ planId: activePlan.id, operationId: createOperationId() }))
+          }
         >
           新建试算
         </Button>
@@ -173,6 +244,17 @@ export function PlannerPage() {
           方案对比
         </Button>
       </div>
+
+      {planner.persist.status === 'failed' && (
+        <div className="persist-banner">
+          <span className="persist-banner__text">
+            写入本地存储失败：{planner.persist.error ?? '未知错误'}。已按操作号保留待写入状态，可重试。
+          </span>
+          <Button small intent="primary" icon="refresh" onClick={() => dispatch(plannerActions.retryPersist())}>
+            按操作号重试写入
+          </Button>
+        </div>
+      )}
 
       <div className="plan-tabs">
         <span className="plan-tabs__label">配载方案</span>
@@ -195,7 +277,13 @@ export function PlannerPage() {
         <div className="plan-tabs__spacer" />
         <span className="save-state">
           <span className="save-state__dot" />
-          自动保存 · {new Date(activePlan.updatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
+          {planner.persist.status === 'failed'
+            ? '写入失败'
+            : planner.persist.status === 'saved'
+              ? '已保存'
+              : '自动保存'}
+          {' · '}
+          {new Date(activePlan.updatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
         </span>
       </div>
 
@@ -204,6 +292,7 @@ export function PlannerPage() {
           containers={planner.containers}
           placements={activePlan.placements}
           ports={planner.ports}
+          reeferPower={reeferPower}
           selectedContainerId={planner.selectedContainerId}
           onSelect={(containerId) => dispatch(plannerActions.selectContainer(containerId))}
           onAutoStow={handleAutoStow}
@@ -218,14 +307,24 @@ export function PlannerPage() {
             <div className="bay-actions">
               <EditableText
                 value={activePlan.name}
-                onChange={(name) => dispatch(plannerActions.renamePlan({ planId: activePlan.id, name }))}
+                onChange={(name) =>
+                  dispatch(
+                    plannerActions.renamePlan({
+                      planId: activePlan.id,
+                      name,
+                      operationId: createOperationId(),
+                    }),
+                  )
+                }
                 selectAllOnFocus
               />
               <Button
                 icon="trash"
                 minimal
                 intent="danger"
-                onClick={() => dispatch(plannerActions.clearPlan())}
+                onClick={() =>
+                  dispatch(plannerActions.clearPlan({ operationId: createOperationId() }))
+                }
               >
                 清空
               </Button>
@@ -245,6 +344,18 @@ export function PlannerPage() {
               规则提醒
             </span>
             <span>
+              <i className="legend-dot legend-dot--socket" />
+              低层有插口
+            </span>
+            <span>
+              <i className="legend-dot legend-dot--plugged" />
+              冷藏箱已接电
+            </span>
+            <span>
+              <i className="legend-dot legend-dot--queued" />
+              冷藏箱待供电
+            </span>
+            <span>
               拖动左侧集装箱到格位，或先选箱再点击空格位
             </span>
           </div>
@@ -255,13 +366,14 @@ export function PlannerPage() {
             containers={planner.containers}
             ports={planner.ports}
             conflicts={conflicts}
+            reeferPower={reeferPower}
             selectedContainerId={planner.selectedContainerId}
             selectedSlot={planner.selectedSlot}
             highlightedConflictId={planner.highlightedConflictId}
             onSlotAssigned={assignContainer}
             onSlotSelected={(slot) => dispatch(plannerActions.selectSlot(slot))}
             onPlacementSelected={selectPlacement}
-            onPlacementRemoved={(placementId) => dispatch(plannerActions.removePlacement(placementId))}
+            onPlacementRemoved={removePlacement}
           />
           <footer className="bay-footer">
             <div className="bay-footer__selection">
@@ -274,14 +386,17 @@ export function PlannerPage() {
             </div>
             <div className="bay-footer__notice">
               <span className={`notice-dot notice-dot--${stability.status}`} />
-              {planner.notice ?? '所有调整都会立即重算稳性、隔离和堆叠规则'}
+              {planner.notice ?? '所有调整都会立即重算稳性、隔离、堆叠与冷藏箱供电'}
             </div>
             <div className="bay-export-actions">
               <Button icon="media" onClick={() => canvasRef.current?.downloadPng()}>
                 导出配载图
               </Button>
-              <Button icon="th" onClick={exportManifest}>
+              <Button icon="th" onClick={handleExportManifest}>
                 导出配载清单
+              </Button>
+              <Button icon="print" onClick={() => setReleaseOpen(true)}>
+                放行打印
               </Button>
               <Button intent="primary" icon="endorsed" onClick={() => setConfirmOpen(true)}>
                 定为最终方案
@@ -292,6 +407,15 @@ export function PlannerPage() {
 
         <section className="planner-right">
           <StabilityDashboard stability={stability} />
+          <ReeferPowerPanel
+            bays={planner.bays}
+            containers={planner.containers}
+            ports={planner.ports}
+            reeferPower={reeferPower}
+            powerWaitQueue={powerWaitQueue}
+            onEditBay={setSocketBay}
+            onLocateContainer={locateContainer}
+          />
           <ConflictList
             conflicts={conflicts}
             containers={planner.containers}
@@ -300,6 +424,36 @@ export function PlannerPage() {
           />
         </section>
       </main>
+
+      <BaySocketDialog
+        open={socketBay !== null}
+        bay={socketBay}
+        onClose={() => setSocketBay(null)}
+        onSave={(bayId, total, oos) =>
+          dispatch(
+            plannerActions.setBaySockets({
+              bayId,
+              powerSockets: total,
+              powerSocketsOutOfService: oos,
+              operationId: createOperationId(),
+            }),
+          )
+        }
+      />
+
+      <ReleasePrintDialog
+        open={releaseOpen}
+        planName={activePlan.name}
+        placementsCount={activePlan.placements.length}
+        containers={planner.containers}
+        ports={planner.ports}
+        powerWaitQueue={powerWaitQueue}
+        pluggedCount={pluggedCount}
+        totalSockets={totalSockets}
+        stability={stability}
+        onClose={() => setReleaseOpen(false)}
+        onConfirm={handleConfirmRelease}
+      />
 
       <Dialog
         isOpen={confirmOpen}
@@ -329,10 +483,21 @@ export function PlannerPage() {
               <strong>{stability.gm.toFixed(3)} m</strong>
             </div>
             <div>
+              <span>冷藏箱接电</span>
+              <strong>
+                {pluggedCount}/{totalSockets}
+              </strong>
+            </div>
+            <div>
               <span>严重异常</span>
               <strong>{conflicts.filter((conflict) => conflict.severity === 'danger').length} 项</strong>
             </div>
           </div>
+          {queuedCount > 0 && (
+            <div className="dialog-warning">
+              当前仍有 {queuedCount} 个冷藏箱在待供电队列，定为最终方案前请优先处理供电。
+            </div>
+          )}
           {conflicts.some((conflict) => conflict.severity === 'danger') && (
             <div className="dialog-warning">
               当前仍存在严重配载异常。确认后会保留异常记录供后续审核，请确认已获配载主管授权。
@@ -345,7 +510,12 @@ export function PlannerPage() {
             intent="primary"
             icon="tick"
             onClick={() => {
-              dispatch(plannerActions.confirmPlan(activePlan.id));
+              dispatch(
+                plannerActions.confirmPlan({
+                  planId: activePlan.id,
+                  operationId: createOperationId(),
+                }),
+              );
               setConfirmOpen(false);
             }}
           >

@@ -31,6 +31,10 @@ export interface Bay {
   rows: number;
   tiers: number;
   maxStackWeight: number;
+  /** 贝位供电插口总数 */
+  powerSockets: number;
+  /** 检修停用的插口数 */
+  powerSocketsOutOfService: number;
 }
 
 export interface Slot {
@@ -45,6 +49,67 @@ export interface Placement extends Slot {
   placedAt: string;
 }
 
+/** 冷藏箱接电状态：已接电 / 待供电 */
+export type ReeferPowerState = 'plugged' | 'queued';
+/** 待供电原因：插口占满 / 层位过高无插口 */
+export type ReeferPowerReason = 'ok' | 'sockets-full' | 'high-tier';
+
+/** 单个冷藏箱的供电结论（随箱位与插口状态失效重算） */
+export interface ReeferPowerInfo {
+  containerId: string;
+  bayId: number;
+  row: number;
+  tier: number;
+  state: ReeferPowerState;
+  reason: ReeferPowerReason;
+  /** 待供电队列序号（从 1 开始），已接电为 null */
+  queueOrder: number | null;
+  /** 卸货港序，决定排队先后 */
+  portSequence: number;
+}
+
+/** 待供电队列条目 */
+export interface PowerWaitEntry {
+  containerId: string;
+  bayId: number;
+  portSequence: number;
+  queueOrder: number;
+  reason: ReeferPowerReason;
+}
+
+/** 贝位插口占用统计 */
+export interface BayPowerStats {
+  bayId: number;
+  bayName: string;
+  total: number;
+  outOfService: number;
+  available: number;
+  plugged: number;
+  queued: number;
+}
+
+/** 操作记录状态：已生效 / 写盘失败 */
+export type OperationStatus = 'committed' | 'failed';
+
+/** 按操作号记录的写操作，用于失败恢复重试与重复提交去重 */
+export interface OperationRecord {
+  operationId: string;
+  type: string;
+  status: OperationStatus;
+  attempts: number;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 写盘持久化状态 */
+export interface PersistState {
+  status: 'idle' | 'saved' | 'failed';
+  lastOperationId: string | null;
+  error: string | null;
+  savedAt: string | null;
+}
+
 export interface StowagePlan {
   id: string;
   name: string;
@@ -53,6 +118,10 @@ export interface StowagePlan {
   createdAt: string;
   updatedAt: string;
   placements: Placement[];
+  /** 冷藏箱供电结论（缓存，箱位或插口变化时失效重算） */
+  reeferPower: ReeferPowerInfo[];
+  /** 待供电队列（按卸货港先后排序） */
+  powerWaitQueue: PowerWaitEntry[];
 }
 
 export interface VesselSpec {
@@ -105,7 +174,14 @@ export interface StabilityIssue {
   message: string;
 }
 
-export type StowageConflictType = 'overweight' | 'wrong-port' | 'top-heavy' | 'segregation' | 'stack-limit' | 'stability';
+export type StowageConflictType =
+  | 'overweight'
+  | 'wrong-port'
+  | 'top-heavy'
+  | 'segregation'
+  | 'stack-limit'
+  | 'stability'
+  | 'reefer-power';
 
 export interface StowageConflict {
   id: string;
@@ -131,4 +207,8 @@ export interface PlannerState {
   past: StowagePlan[][];
   future: StowagePlan[][];
   notice: string | null;
+  /** 按操作号记录的写操作日志 */
+  operations: OperationRecord[];
+  /** 写盘持久化状态 */
+  persist: PersistState;
 }

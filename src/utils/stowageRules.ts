@@ -1,12 +1,4 @@
-import type {
-  Bay,
-  Container,
-  Placement,
-  Port,
-  Slot,
-  StabilityResult,
-  StowageConflict,
-} from '../types/shipping';
+import type { Bay, Container, Placement, Port, ReeferPowerInfo, Slot, StabilityResult, StowageConflict } from '../types/shipping';
 
 const INCOMPATIBLE: Record<string, string[]> = {
   '1.1': ['1.1', '2.1', '3', '4.1', '5.1', '6.1', '8'],
@@ -24,11 +16,13 @@ export function validateStowage(
   bays: Bay[],
   ports: Port[],
   stability: StabilityResult,
+  reeferPower: ReeferPowerInfo[] = [],
 ): StowageConflict[] {
   const conflicts: StowageConflict[] = [];
   const containerMap = new Map(containers.map((container) => [container.id, container]));
   const bayMap = new Map(bays.map((bay) => [bay.id, bay]));
   const portMap = new Map(ports.map((port) => [port.code, port]));
+  const reeferPowerMap = new Map(reeferPower.map((info) => [info.containerId, info]));
   const byStack = new Map<string, Placement[]>();
 
   placements.forEach((placement) => {
@@ -56,6 +50,19 @@ export function validateStowage(
         title: `${container.number} 冷藏箱层位过高`,
         detail: '冷藏箱应布置在具备供电和检修通道的低层格位。',
         suggestion: '将冷藏箱调整至 1—3 层，并确认插座与检修面可用。',
+      });
+    }
+    const power = reeferPowerMap.get(container.id);
+    if (container.reefer && power?.state === 'queued' && power.reason === 'sockets-full') {
+      conflicts.push({
+        id: `reefer-power:${placement.id}`,
+        type: 'reefer-power',
+        severity: 'warning',
+        slot: slotOf(placement),
+        containerIds: [container.id],
+        title: `${container.number} 冷藏箱无可用插口`,
+        detail: `贝位 ${placement.bayId} 的供电插口已占满，该箱在待供电队列第 ${power.queueOrder ?? '-'} 位，到码头将供不上电。`,
+        suggestion: '调出多余冷藏箱、调修停用插口，或改配到有插口的低层格位。',
       });
     }
     const stackKey = `${placement.bayId}:${placement.row}`;

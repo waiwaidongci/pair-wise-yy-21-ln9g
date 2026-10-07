@@ -11,9 +11,11 @@ import type {
   Container,
   Placement,
   Port,
+  ReeferPowerInfo,
   Slot,
   StowageConflict,
 } from '../types/shipping';
+import { REEFER_LOW_TIER_MAX } from '../utils/reeferPower';
 
 export interface BayCanvasHandle {
   downloadPng: () => void;
@@ -25,6 +27,7 @@ interface BayCanvasProps {
   containers: Container[];
   ports: Port[];
   conflicts: StowageConflict[];
+  reeferPower: ReeferPowerInfo[];
   selectedContainerId: string | null;
   selectedSlot: Slot | null;
   highlightedConflictId: string | null;
@@ -50,6 +53,7 @@ export const BayCanvas = forwardRef<BayCanvasHandle, BayCanvasProps>(function Ba
     containers,
     ports,
     conflicts,
+    reeferPower,
     selectedContainerId,
     selectedSlot,
     highlightedConflictId,
@@ -71,6 +75,10 @@ export const BayCanvas = forwardRef<BayCanvasHandle, BayCanvasProps>(function Ba
   const placementMap = useMemo(
     () => new Map(placements.map((placement) => [slotKey(placement), placement])),
     [placements],
+  );
+  const reeferPowerMap = useMemo(
+    () => new Map(reeferPower.map((info) => [info.containerId, info])),
+    [reeferPower],
   );
   const conflictSlots = useMemo(() => {
     const map = new Map<string, StowageConflict>();
@@ -96,7 +104,7 @@ export const BayCanvas = forwardRef<BayCanvasHandle, BayCanvasProps>(function Ba
 
   useEffect(() => {
     drawCanvas();
-  }, [bays, placements, containers, ports, selectedContainerId, selectedSlot, highlightedConflictId, hoveredSlot, conflictSlots]);
+  }, [bays, placements, containers, ports, reeferPower, selectedContainerId, selectedSlot, highlightedConflictId, hoveredSlot, conflictSlots]);
 
   function drawCanvas() {
     const canvas = canvasRef.current;
@@ -155,6 +163,10 @@ export const BayCanvas = forwardRef<BayCanvasHandle, BayCanvasProps>(function Ba
   }
 
   function drawBayPanel(context: CanvasRenderingContext2D, bay: Bay, panelX: number) {
+    const bayReefers = reeferPower.filter((info) => info.bayId === bay.id);
+    const bayPlugged = bayReefers.filter((info) => info.state === 'plugged').length;
+    const bayAvailable = Math.max(0, bay.powerSockets - bay.powerSocketsOutOfService);
+    const bayQueued = bayReefers.length - bayPlugged;
     context.fillStyle = '#ffffff';
     context.strokeStyle = '#c9d5df';
     context.lineWidth = 1;
@@ -164,10 +176,27 @@ export const BayCanvas = forwardRef<BayCanvasHandle, BayCanvasProps>(function Ba
     context.stroke();
     context.fillStyle = '#173b59';
     context.font = '700 13px "Noto Sans SC", sans-serif';
+    context.textAlign = 'left';
     context.fillText(`BAY ${bay.name}`, panelX + 12, TOP - 6);
+    context.fillStyle = bayQueued > 0 ? '#b45309' : '#0f766e';
+    context.font = '700 9px "Noto Sans SC", sans-serif';
+    context.textAlign = 'right';
+    context.fillText(`插口 ${bayPlugged}/${bayAvailable}`, panelX + PANEL_WIDTH - 12, TOP - 7);
     context.fillStyle = '#8090a1';
     context.font = '9px "Noto Sans SC", sans-serif';
-    context.fillText(`${bay.rows}R × ${bay.tiers}T`, panelX + 118, TOP - 7);
+    context.textAlign = 'left';
+    context.fillText(`${bay.rows}R × ${bay.tiers}T`, panelX + 12, TOP + 6);
+    if (bay.powerSocketsOutOfService > 0) {
+      context.fillStyle = '#b45309';
+      context.textAlign = 'right';
+      context.fillText(`检修 ${bay.powerSocketsOutOfService}`, panelX + PANEL_WIDTH - 12, TOP + 6);
+    }
+    if (bayQueued > 0) {
+      context.fillStyle = '#b45309';
+      context.textAlign = 'center';
+      context.fillText(`待电 ${bayQueued}`, panelX + PANEL_WIDTH / 2, TOP + 6);
+    }
+    context.textAlign = 'left';
 
     for (let row = 1; row <= bay.rows; row += 1) {
       const x = panelX + 12 + (row - 1) * ROW_WIDTH;
@@ -214,6 +243,36 @@ export const BayCanvas = forwardRef<BayCanvasHandle, BayCanvasProps>(function Ba
           context.textAlign = 'center';
           context.fillText(container.number.slice(-5), 0, 2);
           context.restore();
+
+          if (container.reefer) {
+            const power = reeferPowerMap.get(container.id);
+            if (power?.state === 'plugged') {
+              context.fillStyle = '#15803d';
+              context.beginPath();
+              context.arc(x + CELL_WIDTH - 3, y + 4, 2.6, 0, Math.PI * 2);
+              context.fill();
+            } else if (power?.state === 'queued') {
+              context.strokeStyle = '#d97706';
+              context.lineWidth = 1.6;
+              context.beginPath();
+              context.roundRect(x + 1, y + 1, CELL_WIDTH - 2, CELL_HEIGHT - 2, 3);
+              context.stroke();
+              context.fillStyle = '#d97706';
+              context.font = '700 6.5px sans-serif';
+              context.textAlign = 'center';
+              context.fillText(
+                power.queueOrder ? `待${power.queueOrder}` : '待',
+                x + CELL_WIDTH / 2,
+                y + CELL_HEIGHT - 3,
+              );
+            }
+          }
+        } else if (tier <= REEFER_LOW_TIER_MAX && bayPlugged < bayAvailable) {
+          // 低层空格位且该贝位仍有可用插口
+          context.fillStyle = '#0e7490';
+          context.beginPath();
+          context.arc(x + 4, y + 4, 1.8, 0, Math.PI * 2);
+          context.fill();
         }
 
         if (conflict) {
@@ -296,6 +355,7 @@ export const BayCanvas = forwardRef<BayCanvasHandle, BayCanvasProps>(function Ba
   const hoveredPlacement = hoveredSlot ? placementMap.get(slotKey(hoveredSlot)) : undefined;
   const hoveredContainer = hoveredPlacement ? containerMap.get(hoveredPlacement.containerId) : undefined;
   const hoveredPort = hoveredContainer ? portMap.get(hoveredContainer.portCode) : undefined;
+  const hoveredPower = hoveredContainer ? reeferPowerMap.get(hoveredContainer.id) : undefined;
 
   return (
     <div className="bay-canvas-shell">
@@ -323,6 +383,13 @@ export const BayCanvas = forwardRef<BayCanvasHandle, BayCanvasProps>(function Ba
             {hoveredContainer ? (
               <span>
                 {hoveredContainer.number} · {hoveredContainer.grossWeight.toFixed(2)} t · {hoveredPort?.name} · {hoveredContainer.type}
+                {hoveredContainer.reefer && hoveredPower && (
+                  <em className={`hover-power hover-power--${hoveredPower.state}`}>
+                    {hoveredPower.state === 'plugged'
+                      ? ' · 已接电'
+                      : ` · 待供电第 ${hoveredPower.queueOrder ?? '-'} 位${hoveredPower.reason === 'high-tier' ? '（层位过高）' : ''}`}
+                  </em>
+                )}
               </span>
             ) : (
               <span>空格位 · 可接收集装箱</span>

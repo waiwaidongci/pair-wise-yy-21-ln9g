@@ -1,9 +1,10 @@
-import { Button, Callout, Divider, ProgressBar, Tag } from '@blueprintjs/core';
+import { Button, Callout, ProgressBar, Tag } from '@blueprintjs/core';
 import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { plannerActions } from '../stores/plannerSlice';
 import { useAppDispatch, useAppSelector } from '../stores/hooks';
 import { downloadManifest } from '../utils/exporters';
+import { createOperationId } from '../utils/persistence';
 import { calculateStability } from '../utils/stability';
 import { validateStowage } from '../utils/stowageRules';
 
@@ -21,8 +22,11 @@ export function ComparePage() {
           planner.bays,
           planner.ports,
           stability,
+          plan.reeferPower,
         );
-        return { plan, stability, conflicts };
+        const queuedCount = plan.powerWaitQueue.length;
+        const pluggedCount = plan.reeferPower.filter((info) => info.state === 'plugged').length;
+        return { plan, stability, conflicts, queuedCount, pluggedCount };
       }),
     [planner],
   );
@@ -34,10 +38,21 @@ export function ComparePage() {
         <div>
           <span className="eyebrow">试算结果</span>
           <h1>配载方案并排对比</h1>
-          <p>比较不同配载顺序下的吃水、纵横倾、GM 和规则异常，选定后可返回编辑或直接确认。</p>
+          <p>比较不同配载顺序下的吃水、纵横倾、GM、冷藏箱供电和规则异常，选定后可返回编辑或直接确认。</p>
         </div>
         <div className="compare-actions">
-          <Button icon="add" outlined onClick={() => dispatch(plannerActions.duplicatePlan(planner.activePlanId))}>
+          <Button
+            icon="add"
+            outlined
+            onClick={() =>
+              dispatch(
+                plannerActions.duplicatePlan({
+                  planId: planner.activePlanId,
+                  operationId: createOperationId(),
+                }),
+              )
+            }
+          >
             复制当前方案
           </Button>
           <Button icon="edit" intent="primary" onClick={() => navigate('/planner')}>
@@ -57,7 +72,7 @@ export function ComparePage() {
           <thead>
             <tr>
               <th>指标 / 方案</th>
-              {rows.map(({ plan, stability, conflicts }) => (
+              {rows.map(({ plan, stability, conflicts, queuedCount }) => (
                 <th key={plan.id} className={plan.id === planner.activePlanId ? 'is-active' : ''}>
                   <div>
                     <Tag minimal intent={plan.status === 'final' ? 'success' : 'none'}>
@@ -83,7 +98,15 @@ export function ComparePage() {
                       minimal
                       icon="download"
                       onClick={() =>
-                        downloadManifest(plan, planner.containers, planner.ports, stability)
+                        downloadManifest(
+                          plan,
+                          planner.containers,
+                          planner.ports,
+                          stability,
+                          planner.bays,
+                          plan.reeferPower,
+                          plan.powerWaitQueue,
+                        )
                       }
                     >
                       清单
@@ -94,13 +117,23 @@ export function ComparePage() {
                       intent={plan.status === 'final' ? 'success' : 'none'}
                       icon="endorsed"
                       disabled={plan.status === 'final'}
-                      onClick={() => dispatch(plannerActions.confirmPlan(plan.id))}
+                      onClick={() =>
+                        dispatch(
+                          plannerActions.confirmPlan({
+                            planId: plan.id,
+                            operationId: createOperationId(),
+                          }),
+                        )
+                      }
                     >
                       确认
                     </Button>
                   </div>
                   {conflicts.some((conflict) => conflict.severity === 'danger') && (
                     <span className="compare-risk">存在严重异常</span>
+                  )}
+                  {queuedCount > 0 && (
+                    <span className="compare-risk compare-risk--power">{queuedCount} 箱待供电</span>
                   )}
                 </th>
               ))}
@@ -111,6 +144,15 @@ export function ComparePage() {
             <CompareRow
               label="货物重量"
               values={rows.map(({ stability }) => `${stability.loadWeight.toFixed(1)} t`)}
+            />
+            <CompareRow
+              label="冷藏箱接电"
+              values={rows.map(({ pluggedCount, plan }) => `${pluggedCount}/${plan.reeferPower.length}`)}
+            />
+            <CompareRow
+              label="待供电队列"
+              values={rows.map(({ queuedCount }) => `${queuedCount} 箱`)}
+              danger={rows.map(({ queuedCount }) => queuedCount > 0)}
             />
             <CompareRow
               label="平均吃水"
@@ -143,7 +185,6 @@ export function ComparePage() {
               values={rows.map(
                 ({ conflicts }) => `${conflicts.filter((conflict) => conflict.severity === 'danger').length} 项`,
               )}
-              danger={rows.map(({ conflicts }) => conflicts.some((conflict) => conflict.severity === 'danger'))}
             />
             <CompareRow
               label="全部异常"
@@ -161,7 +202,7 @@ export function ComparePage() {
             />
             <tr>
               <th>稳性评分</th>
-              {rows.map(({ plan, stability, conflicts }) => {
+              {rows.map(({ plan, stability, conflicts, queuedCount }) => {
                 const score = Math.max(
                   0,
                   Math.round(
@@ -169,6 +210,7 @@ export function ComparePage() {
                       Math.abs(stability.heel) * 6 -
                       Math.abs(stability.trim) * 8 -
                       conflicts.length * 1.8 -
+                      queuedCount * 2.5 -
                       (stability.status === 'danger' ? 28 : stability.status === 'warning' ? 10 : 0),
                   ),
                 );
@@ -193,13 +235,18 @@ export function ComparePage() {
       <section className="compare-notes">
         <h2>调整建议</h2>
         <div className="compare-note-grid">
-          {rows.map(({ plan, stability, conflicts }) => (
+          {rows.map(({ plan, stability, conflicts, queuedCount }) => (
             <article key={plan.id}>
               <header>
                 <strong>{plan.name}</strong>
                 <Tag minimal>{plan.placements.length} 箱</Tag>
               </header>
               <p>{plan.note}</p>
+              {queuedCount > 0 && (
+                <Callout intent="warning" compact>
+                  有 {queuedCount} 个冷藏箱待供电，放行前需清空队列。
+                </Callout>
+              )}
               {stability.issues.length || conflicts.length ? (
                 <ul>
                   {stability.issues.slice(0, 2).map((issue) => (

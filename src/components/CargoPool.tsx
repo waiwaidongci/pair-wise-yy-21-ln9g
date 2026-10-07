@@ -1,12 +1,13 @@
 import { Button, HTMLSelect, InputGroup, Tag } from '@blueprintjs/core';
 import { useMemo, useState } from 'react';
-import type { Container, Placement, Port } from '../types/shipping';
+import type { Container, Placement, Port, ReeferPowerInfo } from '../types/shipping';
 import { classLabel } from '../utils/stowageRules';
 
 interface CargoPoolProps {
   containers: Container[];
   placements: Placement[];
   ports: Port[];
+  reeferPower: ReeferPowerInfo[];
   selectedContainerId: string | null;
   onSelect: (containerId: string | null) => void;
   onAutoStow: () => void;
@@ -16,6 +17,7 @@ export function CargoPool({
   containers,
   placements,
   ports,
+  reeferPower,
   selectedContainerId,
   onSelect,
   onAutoStow,
@@ -25,6 +27,10 @@ export function CargoPool({
   const [hazardOnly, setHazardOnly] = useState(false);
   const placedIds = useMemo(() => new Set(placements.map((placement) => placement.containerId)), [placements]);
   const portMap = useMemo(() => new Map(ports.map((port) => [port.code, port])), [ports]);
+  const powerMap = useMemo(
+    () => new Map(reeferPower.map((info) => [info.containerId, info])),
+    [reeferPower],
+  );
   const filtered = containers.filter((container) => {
     const normalized = query.trim().toLowerCase();
     const queryMatch =
@@ -96,6 +102,16 @@ export function CargoPool({
                 </span>
                 <span className="cargo-card__meta">
                   {container.type} · {container.grossWeight.toFixed(2)} t · {container.reefer ? '冷藏' : '普通'}
+                  {container.reefer && placed && powerMap.get(container.id) && (
+                    <Tag
+                      minimal
+                      intent={powerMap.get(container.id)!.state === 'plugged' ? 'success' : 'warning'}
+                    >
+                      {powerMap.get(container.id)!.state === 'plugged'
+                        ? '已接电'
+                        : `待供电${powerMap.get(container.id)!.queueOrder ? ` ${powerMap.get(container.id)!.queueOrder}` : ''}`}
+                    </Tag>
+                  )}
                 </span>
                 <span className="cargo-card__meta">
                   {port?.name}（{container.portCode}） · {classLabel(container.hazardClass)}
