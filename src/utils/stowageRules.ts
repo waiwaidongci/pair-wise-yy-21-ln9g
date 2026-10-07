@@ -49,12 +49,12 @@ export function validateStowage(
     if (container.reefer && placement.tier > 3) {
       conflicts.push({
         id: `reefer:${placement.id}`,
-        type: 'top-heavy',
+        type: 'reefer-tier',
         severity: 'warning',
         slot: slotOf(placement),
         containerIds: [container.id],
         title: `${container.number} 冷藏箱层位过高`,
-        detail: '冷藏箱应布置在具备供电和检修通道的低层格位。',
+        detail: '冷藏箱应布置在具备供电和检修通道的低层格位（1—3 层）。',
         suggestion: '将冷藏箱调整至 1—3 层，并确认插座与检修面可用。',
       });
     }

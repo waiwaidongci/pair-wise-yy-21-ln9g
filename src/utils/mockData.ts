@@ -25,6 +25,9 @@ export const BAYS: Bay[] = Array.from({ length: 7 }, (_, index) => ({
   rows: 8,
   tiers: 6,
   maxStackWeight: index < 2 ? 105 : 88,
+  // 全船 28 个冷藏箱插口；中部 06 贝有 2 个插口检修停用
+  reeferSocketTotal: [4, 4, 4, 4, 4, 4, 4][index],
+  reeferSocketOutage: [0, 0, 2, 0, 0, 0, 0][index],
 }));
 
 export const VESSEL: VesselSpec = {
@@ -130,6 +133,7 @@ export function createInitialPlans(): StowagePlan[] {
       createdAt: '2026-10-06T02:20:00.000Z',
       updatedAt: '2026-10-06T03:45:00.000Z',
       placements: primary,
+      pendingReefers: [],
     },
     {
       id: 'PLAN-B',
@@ -139,6 +143,7 @@ export function createInitialPlans(): StowagePlan[] {
       createdAt: '2026-10-06T03:48:00.000Z',
       updatedAt: '2026-10-06T04:10:00.000Z',
       placements: portOptimized,
+      pendingReefers: [],
     },
   ];
 }

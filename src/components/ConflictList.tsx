@@ -41,6 +41,8 @@ export function ConflictList({
           <option value="segregation">危险品隔离</option>
           <option value="stack-limit">堆重超限</option>
           <option value="stability">稳性异常</option>
+          <option value="reefer-tier">冷箱层高</option>
+          <option value="reefer-power">冷箱供电</option>
         </HTMLSelect>
         <span>点选异常可定位格位</span>
       </div>
@@ -95,6 +97,8 @@ function conflictLabel(type: StowageConflictType): string {
     segregation: '隔离',
     'stack-limit': '堆重',
     stability: '稳性',
+    'reefer-power': '供电',
+    'reefer-tier': '冷箱层',
   };
   return labels[type];
 }

@@ -45,6 +45,28 @@ export function calculateStability(
     if (container.reefer) reeferCount += 1;
   });
 
+  return stabilityFromMoments(vessel, {
+    loadWeight,
+    longitudinalMoment,
+    transverseMoment,
+    verticalMoment,
+    reeferCount,
+    placementCount: placements.length,
+  });
+}
+
+export interface StabilityMoments {
+  loadWeight: number;
+  longitudinalMoment: number;
+  transverseMoment: number;
+  verticalMoment: number;
+  reeferCount: number;
+  placementCount: number;
+}
+
+/** 由重量与三向力矩汇总推导全船水动力/稳性结论（增量计算器复用此尾段） */
+export function stabilityFromMoments(vessel: VesselSpec, input: StabilityMoments): StabilityResult {
+  const { loadWeight, longitudinalMoment, transverseMoment, verticalMoment, reeferCount, placementCount } = input;
   const displacement = vessel.lightshipWeight + loadWeight;
   const hydro = interpolateByDisplacement(vessel.hydrostaticTable, displacement);
   const tcg = loadWeight > 0 ? transverseMoment / loadWeight : 0;
@@ -55,7 +77,7 @@ export function calculateStability(
   const kg =
     (vessel.lightshipWeight * vessel.lightshipVcg + loadWeight * cargoVcg) / displacement +
     reeferCount * 0.008;
-  const freeSurfaceCorrection = Math.min(0.16, placements.length * 0.0025);
+  const freeSurfaceCorrection = Math.min(0.16, placementCount * 0.0025);
   const gm = Math.max(0.05, hydro.km - kg - freeSurfaceCorrection);
   const trim = ((lcg - hydro.lcb) * displacement) / Math.max(100, hydro.mct) / 100;
   const draftFore = hydro.draft + trim / 2;

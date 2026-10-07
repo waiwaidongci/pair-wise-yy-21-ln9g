@@ -31,6 +31,17 @@ export interface Bay {
   rows: number;
   tiers: number;
   maxStackWeight: number;
+  /** 贝位冷藏箱供电插口总数 */
+  reeferSocketTotal: number;
+  /** 检修停用的插口数量 */
+  reeferSocketOutage: number;
+}
+
+/** 待供电队列中的冷藏箱：插口腾退后按卸货港顺序自动补位 */
+export interface PendingReefer {
+  containerId: string;
+  /** 单调递增的入队序号，同时作为同港序时的决胜依据 */
+  enqueuedAt: number;
 }
 
 export interface Slot {
@@ -53,6 +64,8 @@ export interface StowagePlan {
   createdAt: string;
   updatedAt: string;
   placements: Placement[];
+  /** 等待可用供电插口的冷藏箱队列（已按卸货港/入队序排好） */
+  pendingReefers: PendingReefer[];
 }
 
 export interface VesselSpec {
@@ -105,7 +118,15 @@ export interface StabilityIssue {
   message: string;
 }
 
-export type StowageConflictType = 'overweight' | 'wrong-port' | 'top-heavy' | 'segregation' | 'stack-limit' | 'stability';
+export type StowageConflictType =
+  | 'overweight'
+  | 'wrong-port'
+  | 'top-heavy'
+  | 'segregation'
+  | 'stack-limit'
+  | 'stability'
+  | 'reefer-power'
+  | 'reefer-tier';
 
 export interface StowageConflict {
   id: string;
@@ -128,7 +149,13 @@ export interface PlannerState {
   selectedContainerId: string | null;
   selectedSlot: Slot | null;
   highlightedConflictId: string | null;
-  past: StowagePlan[][];
-  future: StowagePlan[][];
+  past: HistorySnapshot[];
+  future: HistorySnapshot[];
   notice: string | null;
+}
+
+/** 撤销/重做快照：方案与贝位插口状态一起回滚 */
+export interface HistorySnapshot {
+  plans: StowagePlan[];
+  bays: Bay[];
 }

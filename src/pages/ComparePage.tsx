@@ -1,4 +1,4 @@
-import { Button, Callout, Divider, ProgressBar, Tag } from '@blueprintjs/core';
+import { Button, Callout, ProgressBar, Tag, Tooltip } from '@blueprintjs/core';
 import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { plannerActions } from '../stores/plannerSlice';
@@ -34,7 +34,7 @@ export function ComparePage() {
         <div>
           <span className="eyebrow">试算结果</span>
           <h1>配载方案并排对比</h1>
-          <p>比较不同配载顺序下的吃水、纵横倾、GM 和规则异常，选定后可返回编辑或直接确认。</p>
+          <p>比较不同配载顺序下的吃水、纵横倾、GM、插口占用和规则异常，选定后可返回编辑或直接确认。</p>
         </div>
         <div className="compare-actions">
           <Button icon="add" outlined onClick={() => dispatch(plannerActions.duplicatePlan(planner.activePlanId))}>
@@ -48,7 +48,8 @@ export function ComparePage() {
 
       {finalPlan && (
         <Callout intent="success" icon="endorsed" className="final-plan-callout">
-          最终方案：{finalPlan.name}，已记录 {finalPlan.placements.length} 个集装箱。
+          最终方案：{finalPlan.name}，已记录 {finalPlan.placements.length} 个集装箱
+          {finalPlan.pendingReefers.length > 0 && `，但仍有 ${finalPlan.pendingReefers.length} 个冷箱待供电`}。
         </Callout>
       )}
 
@@ -57,7 +58,7 @@ export function ComparePage() {
           <thead>
             <tr>
               <th>指标 / 方案</th>
-              {rows.map(({ plan, stability, conflicts }) => (
+              {rows.map(({ plan, conflicts }) => (
                 <th key={plan.id} className={plan.id === planner.activePlanId ? 'is-active' : ''}>
                   <div>
                     <Tag minimal intent={plan.status === 'final' ? 'success' : 'none'}>
@@ -83,24 +84,45 @@ export function ComparePage() {
                       minimal
                       icon="download"
                       onClick={() =>
-                        downloadManifest(plan, planner.containers, planner.ports, stability)
+                        downloadManifest(plan, planner.containers, planner.ports, rows.find((row) => row.plan.id === plan.id)!.stability, {
+                          bays: planner.bays,
+                          pendingReefers: plan.pendingReefers,
+                        })
                       }
                     >
                       清单
                     </Button>
-                    <Button
-                      small
-                      minimal
-                      intent={plan.status === 'final' ? 'success' : 'none'}
-                      icon="endorsed"
-                      disabled={plan.status === 'final'}
-                      onClick={() => dispatch(plannerActions.confirmPlan(plan.id))}
+                    <Tooltip
+                      compact
+                      disabled={plan.pendingReefers.length === 0}
+                      content={`待供电队列尚有 ${plan.pendingReefers.length} 个冷箱，需先完成补电才能放行`}
                     >
-                      确认
-                    </Button>
+                      <Button
+                        small
+                        minimal
+                        intent={plan.status === 'final' ? 'success' : 'none'}
+                        icon="endorsed"
+                        disabled={plan.status === 'final' || plan.pendingReefers.length > 0}
+                        onClick={() =>
+                          dispatch(
+                            plannerActions.confirmPlan({
+                              planId: plan.id,
+                              opId: `CONFIRM-CMP-${plan.id}-${Date.now()}`,
+                            }),
+                          )
+                        }
+                      >
+                        确认
+                      </Button>
+                    </Tooltip>
                   </div>
                   {conflicts.some((conflict) => conflict.severity === 'danger') && (
                     <span className="compare-risk">存在严重异常</span>
+                  )}
+                  {plan.pendingReefers.length > 0 && (
+                    <span className="compare-risk compare-risk--power">
+                      {plan.pendingReefers.length} 冷箱待供电，已拦截放行
+                    </span>
                   )}
                 </th>
               ))}
@@ -108,6 +130,11 @@ export function ComparePage() {
           </thead>
           <tbody>
             <CompareRow label="已配箱数" values={rows.map(({ plan }) => String(plan.placements.length))} />
+            <CompareRow
+              label="待供电冷箱"
+              values={rows.map(({ plan }) => `${plan.pendingReefers.length} 箱`)}
+              danger={rows.map(({ plan }) => plan.pendingReefers.length > 0)}
+            />
             <CompareRow
               label="货物重量"
               values={rows.map(({ stability }) => `${stability.loadWeight.toFixed(1)} t`)}
@@ -149,16 +176,6 @@ export function ComparePage() {
               label="全部异常"
               values={rows.map(({ conflicts }) => `${conflicts.length} 项`)}
             />
-            <CompareRow
-              label="稳性余量"
-              values={rows.map(({ stability }) =>
-                stability.status === 'stable'
-                  ? '满足标准'
-                  : stability.status === 'warning'
-                    ? '余量偏小'
-                    : '超限',
-              )}
-            />
             <tr>
               <th>稳性评分</th>
               {rows.map(({ plan, stability, conflicts }) => {
@@ -169,6 +186,7 @@ export function ComparePage() {
                       Math.abs(stability.heel) * 6 -
                       Math.abs(stability.trim) * 8 -
                       conflicts.length * 1.8 -
+                      plan.pendingReefers.length * 6 -
                       (stability.status === 'danger' ? 28 : stability.status === 'warning' ? 10 : 0),
                   ),
                 );
@@ -198,10 +216,14 @@ export function ComparePage() {
               <header>
                 <strong>{plan.name}</strong>
                 <Tag minimal>{plan.placements.length} 箱</Tag>
+                {plan.pendingReefers.length > 0 && <Tag minimal intent="danger">待供电 {plan.pendingReefers.length}</Tag>}
               </header>
               <p>{plan.note}</p>
-              {stability.issues.length || conflicts.length ? (
+              {stability.issues.length || conflicts.length || plan.pendingReefers.length ? (
                 <ul>
+                  {plan.pendingReefers.slice(0, 2).map((item) => (
+                    <li key={item.containerId}>冷箱 {item.containerId} 待供电：请检修恢复插口或腾退低层格位</li>
+                  ))}
                   {stability.issues.slice(0, 2).map((issue) => (
                     <li key={issue.metric}>{issue.message}</li>
                   ))}

@@ -16,6 +16,7 @@ try {
       plans?: unknown;
       activePlanId?: unknown;
       selectedContainerId?: unknown;
+      bays?: unknown;
     };
     if (Array.isArray(parsed.plans) && parsed.plans.length > 0) {
       store.dispatch(
@@ -27,6 +28,7 @@ try {
               : (parsed.plans[0] as { id: string }).id,
           selectedContainerId:
             typeof parsed.selectedContainerId === 'string' ? parsed.selectedContainerId : null,
+          bays: Array.isArray(parsed.bays) ? (parsed.bays as never) : undefined,
         }),
       );
     }

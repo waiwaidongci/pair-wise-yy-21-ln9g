@@ -8,6 +8,8 @@ interface CargoPoolProps {
   placements: Placement[];
   ports: Port[];
   selectedContainerId: string | null;
+  /** 插口不足、正在排队等待供电的冷箱 id */
+  pendingReeferIds?: string[];
   onSelect: (containerId: string | null) => void;
   onAutoStow: () => void;
 }
@@ -17,6 +19,7 @@ export function CargoPool({
   placements,
   ports,
   selectedContainerId,
+  pendingReeferIds = [],
   onSelect,
   onAutoStow,
 }: CargoPoolProps) {
@@ -24,6 +27,7 @@ export function CargoPool({
   const [portFilter, setPortFilter] = useState('all');
   const [hazardOnly, setHazardOnly] = useState(false);
   const placedIds = useMemo(() => new Set(placements.map((placement) => placement.containerId)), [placements]);
+  const pendingIds = useMemo(() => new Set(pendingReeferIds), [pendingReeferIds]);
   const portMap = useMemo(() => new Map(ports.map((port) => [port.code, port])), [ports]);
   const filtered = containers.filter((container) => {
     const normalized = query.trim().toLowerCase();
@@ -35,7 +39,9 @@ export function CargoPool({
     const hazardMatch = !hazardOnly || container.hazardClass !== 'none';
     return queryMatch && portMatch && hazardMatch;
   });
-  const unplacedCount = containers.filter((container) => !placedIds.has(container.id)).length;
+  const unplacedCount = containers.filter(
+    (container) => !placedIds.has(container.id) && !pendingIds.has(container.id),
+  ).length;
 
   return (
     <section className="panel cargo-pool">
@@ -74,14 +80,15 @@ export function CargoPool({
       <div className="cargo-list">
         {filtered.map((container) => {
           const placed = placedIds.has(container.id);
+          const pending = pendingIds.has(container.id);
           const selected = selectedContainerId === container.id;
           const port = portMap.get(container.portCode);
           return (
             <button
               key={container.id}
               type="button"
-              className={`cargo-card ${selected ? 'is-selected' : ''} ${placed ? 'is-placed' : ''}`}
-              draggable
+              className={`cargo-card ${selected ? 'is-selected' : ''} ${placed ? 'is-placed' : ''} ${pending ? 'is-pending' : ''}`}
+              draggable={!pending}
               onClick={() => onSelect(selected ? null : container.id)}
               onDragStart={(event) => {
                 event.dataTransfer.setData('application/x-container-id', container.id);
@@ -93,6 +100,7 @@ export function CargoPool({
                 <span className="cargo-card__top">
                   <strong>{container.number}</strong>
                   {placed && <Tag minimal intent="success">已配</Tag>}
+                  {pending && <Tag minimal intent="danger">待供电</Tag>}
                 </span>
                 <span className="cargo-card__meta">
                   {container.type} · {container.grossWeight.toFixed(2)} t · {container.reefer ? '冷藏' : '普通'}

@@ -14,13 +14,14 @@ import type { BayCanvasHandle } from '../components/BayCanvas';
 import { CargoPool } from '../components/CargoPool';
 import { ConflictList } from '../components/ConflictList';
 import { StabilityDashboard } from '../components/StabilityDashboard';
+import { ReeferPowerPanel, gateMessage } from '../components/ReeferPowerPanel';
+import { SaveIndicator } from '../components/SaveIndicator';
 import { plannerActions } from '../stores/plannerSlice';
 import { useAppDispatch, useAppSelector } from '../stores/hooks';
 import type { Placement, Slot, StowageConflict } from '../types/shipping';
 import { downloadManifest } from '../utils/exporters';
-import { calculateStability } from '../utils/stability';
 import { findAutoStowPlacements } from '../utils/stowage';
-import { validateStowage } from '../utils/stowageRules';
+import { IncrementalStability, IncrementalStowageRules } from '../utils/incremental';
 
 export function PlannerPage() {
   const dispatch = useAppDispatch();
@@ -28,28 +29,53 @@ export function PlannerPage() {
   const planner = useAppSelector((state) => state.planner);
   const canvasRef = useRef<BayCanvasHandle>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  /** 放行对话框打开时生成的操作号：重复点击确认只提交一次 */
+  const confirmOpId = useRef<string | null>(null);
   const activePlan = planner.plans.find((plan) => plan.id === planner.activePlanId) ?? planner.plans[0];
-  const stability = useMemo(
-    () =>
-      activePlan
-        ? calculateStability(activePlan.placements, planner.containers, planner.bays, planner.vessel)
-        : null,
-    [activePlan, planner.containers, planner.bays, planner.vessel],
-  );
-  const conflicts = useMemo(
-    () =>
-      activePlan && stability
-        ? validateStowage(activePlan.placements, planner.containers, planner.bays, planner.ports, stability)
-        : [],
-    [activePlan, planner.containers, planner.bays, planner.ports, stability],
-  );
+
+  const stabilityCalc = useRef(new IncrementalStability());
+  const rulesCalc = useRef(new IncrementalStowageRules());
+  // 切换方案后缓存按方案隔离
+  const cachedPlanId = useRef<string | null>(null);
+
+  const stability = useMemo(() => {
+    if (!activePlan) return null;
+    if (cachedPlanId.current !== activePlan.id) {
+      stabilityCalc.current = new IncrementalStability();
+      rulesCalc.current = new IncrementalStowageRules();
+      cachedPlanId.current = activePlan.id;
+    }
+    return stabilityCalc.current.calculate(
+      activePlan.placements,
+      planner.containers,
+      planner.bays,
+      planner.vessel,
+    );
+  }, [activePlan, planner.containers, planner.bays, planner.vessel]);
+
+  const conflicts = useMemo(() => {
+    if (!activePlan || !stability) return [];
+    return rulesCalc.current.validate(
+      activePlan.placements,
+      planner.containers,
+      planner.bays,
+      planner.ports,
+      stability,
+    );
+  }, [activePlan, planner.containers, planner.bays, planner.ports, stability]);
+
+  const stabilityStats = stabilityCalc.current.stats();
+  const rulesStats = rulesCalc.current.stats();
+
   const selectedPlacement = useMemo(() => {
     if (!activePlan || !planner.selectedContainerId) return null;
     return activePlan.placements.find((placement) => placement.containerId === planner.selectedContainerId) ?? null;
   }, [activePlan, planner.selectedContainerId]);
   const unplacedCount = activePlan
-    ? planner.containers.length - activePlan.placements.length
+    ? planner.containers.length - activePlan.placements.length - activePlan.pendingReefers.length
     : planner.containers.length;
+  const pendingCount = activePlan?.pendingReefers.length ?? 0;
+  const blockedByPower = pendingCount > 0;
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -88,12 +114,17 @@ export function PlannerPage() {
   }
 
   function handleAutoStow() {
-    const newPlacements = findAutoStowPlacements(
+    const result = findAutoStowPlacements(
       planner.containers,
       activePlan.placements,
       planner.bays,
     );
-    dispatch(plannerActions.autoStow(newPlacements));
+    dispatch(
+      plannerActions.autoStow({
+        placements: result.placements,
+        unpoweredReeferIds: result.unpoweredReeferIds,
+      }),
+    );
   }
 
   function focusConflict(conflict: StowageConflict) {
@@ -104,8 +135,25 @@ export function PlannerPage() {
     dispatch(plannerActions.selectSlot(conflict.slot));
   }
 
+  function focusPending(containerId: string) {
+    dispatch(plannerActions.selectContainer(containerId));
+    const firstBay = planner.bays[0];
+    if (firstBay) dispatch(plannerActions.selectSlot({ bayId: firstBay.id, row: 1, tier: 1 }));
+    dispatch(plannerActions.setNotice('该冷箱在待供电队列中，插口腾退时会自动补进低层格位'));
+  }
+
   function exportManifest() {
-    downloadManifest(activePlan, planner.containers, planner.ports, stability!);
+    downloadManifest(activePlan, planner.containers, planner.ports, stability!, {
+      bays: planner.bays,
+      pendingReefers: activePlan.pendingReefers,
+    });
+  }
+
+  function openConfirm() {
+    if (blockedByPower) return;
+    // 操作号在打开对话框时生成，确认动作重复提交只认一次
+    confirmOpId.current = `CONFIRM-${activePlan.id}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    setConfirmOpen(true);
   }
 
   const conflictIntent: Intent =
@@ -114,6 +162,11 @@ export function PlannerPage() {
       : conflicts.length
         ? 'warning'
         : 'success';
+
+  const incrementalHint =
+    stabilityStats.total > 0
+      ? `增量重算：稳性沿用 ${stabilityStats.reused} 箱、重算 ${stabilityStats.recomputed} 箱；规则沿用 ${rulesStats.reused} 箱、重算 ${rulesStats.recomputed} 箱`
+      : '';
 
   return (
     <div className="planner-page">
@@ -132,6 +185,10 @@ export function PlannerPage() {
           <small>已配箱</small>
           <strong>{activePlan.placements.length}</strong>
           <span>/ {planner.containers.length}</span>
+        </div>
+        <div className="toolbar-stat">
+          <small>待供电</small>
+          <strong className={blockedByPower ? 'text-danger' : ''}>{pendingCount}</strong>
         </div>
         <div className="toolbar-stat">
           <small>未配箱</small>
@@ -185,7 +242,12 @@ export function PlannerPage() {
           >
             <span>
               <strong>{plan.name}</strong>
-              <small>{plan.placements.length} 箱</small>
+              <small>
+                {plan.placements.length} 箱
+                {plan.pendingReefers.length > 0 && (
+                  <em className="plan-tab__pending"> · 待供电 {plan.pendingReefers.length}</em>
+                )}
+              </small>
             </span>
             <Tag minimal intent={plan.status === 'final' ? 'success' : 'none'}>
               {plan.status === 'final' ? '最终' : '试算'}
@@ -193,10 +255,7 @@ export function PlannerPage() {
           </button>
         ))}
         <div className="plan-tabs__spacer" />
-        <span className="save-state">
-          <span className="save-state__dot" />
-          自动保存 · {new Date(activePlan.updatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
-        </span>
+        <SaveIndicator />
       </div>
 
       <main className="planner-workspace">
@@ -205,6 +264,7 @@ export function PlannerPage() {
           placements={activePlan.placements}
           ports={planner.ports}
           selectedContainerId={planner.selectedContainerId}
+          pendingReeferIds={activePlan.pendingReefers.map((item) => item.containerId)}
           onSelect={(containerId) => dispatch(plannerActions.selectContainer(containerId))}
           onAutoStow={handleAutoStow}
         />
@@ -245,6 +305,10 @@ export function PlannerPage() {
               规则提醒
             </span>
             <span>
+              <i className="legend-box legend-box--power" />
+              冷箱已接插供电
+            </span>
+            <span>
               拖动左侧集装箱到格位，或先选箱再点击空格位
             </span>
           </div>
@@ -274,23 +338,55 @@ export function PlannerPage() {
             </div>
             <div className="bay-footer__notice">
               <span className={`notice-dot notice-dot--${stability.status}`} />
-              {planner.notice ?? '所有调整都会立即重算稳性、隔离和堆叠规则'}
+              <Tooltip content={incrementalHint} compact disabled={!incrementalHint}>
+                <span>{planner.notice ?? '所有调整都会立即重算稳性、隔离、插口占用与排队规则'}</span>
+              </Tooltip>
             </div>
             <div className="bay-export-actions">
-              <Button icon="media" onClick={() => canvasRef.current?.downloadPng()}>
-                导出配载图
-              </Button>
+              <Tooltip
+                content={gateMessage(pendingCount) ?? '导出当前配载图 PNG'}
+                compact
+                disabled={!blockedByPower}
+              >
+                <Button
+                  icon="media"
+                  disabled={blockedByPower}
+                  onClick={() => canvasRef.current?.downloadPng()}
+                >
+                  导出配载图
+                </Button>
+              </Tooltip>
               <Button icon="th" onClick={exportManifest}>
                 导出配载清单
               </Button>
-              <Button intent="primary" icon="endorsed" onClick={() => setConfirmOpen(true)}>
-                定为最终方案
-              </Button>
+              <Tooltip
+                content={gateMessage(pendingCount) ?? '待供电队列清空后可定为最终方案'}
+                compact
+                disabled={!blockedByPower}
+              >
+                <Button
+                  intent="primary"
+                  icon="endorsed"
+                  disabled={blockedByPower}
+                  onClick={openConfirm}
+                >
+                  定为最终方案
+                </Button>
+              </Tooltip>
             </div>
           </footer>
         </section>
 
         <section className="planner-right">
+          <ReeferPowerPanel
+            bays={planner.bays}
+            containers={planner.containers}
+            ports={planner.ports}
+            placements={activePlan.placements}
+            pendingReefers={activePlan.pendingReefers}
+            onBaySocketsChange={(payload) => dispatch(plannerActions.setBaySockets(payload))}
+            onPendingClick={focusPending}
+          />
           <StabilityDashboard stability={stability} />
           <ConflictList
             conflicts={conflicts}
@@ -345,7 +441,15 @@ export function PlannerPage() {
             intent="primary"
             icon="tick"
             onClick={() => {
-              dispatch(plannerActions.confirmPlan(activePlan.id));
+              if (confirmOpId.current) {
+                dispatch(
+                  plannerActions.confirmPlan({
+                    planId: activePlan.id,
+                    opId: confirmOpId.current,
+                  }),
+                );
+              }
+              confirmOpId.current = null;
               setConfirmOpen(false);
             }}
           >

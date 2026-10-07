@@ -14,6 +14,7 @@ import type {
   Slot,
   StowageConflict,
 } from '../types/shipping';
+import { baySocketCapacity } from '../utils/reeferPower';
 
 export interface BayCanvasHandle {
   downloadPng: () => void;
@@ -79,6 +80,15 @@ export const BayCanvas = forwardRef<BayCanvasHandle, BayCanvasProps>(function Ba
     });
     return map;
   }, [conflicts]);
+  const reeferUsageByBay = useMemo(() => {
+    const map = new Map<number, number>();
+    placements.forEach((placement) => {
+      if (containerMap.get(placement.containerId)?.reefer) {
+        map.set(placement.bayId, (map.get(placement.bayId) ?? 0) + 1);
+      }
+    });
+    return map;
+  }, [placements, containerMap]);
 
   const canvasWidth = bays.length * (PANEL_WIDTH + GAP) + 48;
   const canvasHeight = 478;
@@ -96,7 +106,7 @@ export const BayCanvas = forwardRef<BayCanvasHandle, BayCanvasProps>(function Ba
 
   useEffect(() => {
     drawCanvas();
-  }, [bays, placements, containers, ports, selectedContainerId, selectedSlot, highlightedConflictId, hoveredSlot, conflictSlots]);
+  }, [bays, placements, containers, ports, selectedContainerId, selectedSlot, highlightedConflictId, hoveredSlot, conflictSlots, reeferUsageByBay]);
 
   function drawCanvas() {
     const canvas = canvasRef.current;
@@ -165,9 +175,20 @@ export const BayCanvas = forwardRef<BayCanvasHandle, BayCanvasProps>(function Ba
     context.fillStyle = '#173b59';
     context.font = '700 13px "Noto Sans SC", sans-serif';
     context.fillText(`BAY ${bay.name}`, panelX + 12, TOP - 6);
+    const capacity = baySocketCapacity(bay);
+    const used = reeferUsageByBay.get(bay.id) ?? 0;
+    const tight = used >= capacity;
+    context.fillStyle = tight ? '#d92d3f' : '#0f766e';
+    context.font = '700 9px "Noto Sans SC", sans-serif';
+    context.fillText(`⚡${used}/${capacity}`, panelX + 88, TOP - 7);
     context.fillStyle = '#8090a1';
     context.font = '9px "Noto Sans SC", sans-serif';
-    context.fillText(`${bay.rows}R × ${bay.tiers}T`, panelX + 118, TOP - 7);
+    context.fillText(`${bay.rows}R × ${bay.tiers}T`, panelX + 134, TOP - 7);
+    if (bay.reeferSocketOutage > 0) {
+      context.fillStyle = '#b45309';
+      context.font = '8px "Noto Sans SC", sans-serif';
+      context.fillText(`检修停 ${bay.reeferSocketOutage}`, panelX + 168, TOP - 7);
+    }
 
     for (let row = 1; row <= bay.rows; row += 1) {
       const x = panelX + 12 + (row - 1) * ROW_WIDTH;
@@ -214,6 +235,14 @@ export const BayCanvas = forwardRef<BayCanvasHandle, BayCanvasProps>(function Ba
           context.textAlign = 'center';
           context.fillText(container.number.slice(-5), 0, 2);
           context.restore();
+
+          if (container.reefer) {
+            // 已接插供电标记
+            context.fillStyle = '#fde047';
+            context.font = '8px sans-serif';
+            context.textAlign = 'left';
+            context.fillText('⚡', x + 2, y + 9);
+          }
         }
 
         if (conflict) {
@@ -296,6 +325,7 @@ export const BayCanvas = forwardRef<BayCanvasHandle, BayCanvasProps>(function Ba
   const hoveredPlacement = hoveredSlot ? placementMap.get(slotKey(hoveredSlot)) : undefined;
   const hoveredContainer = hoveredPlacement ? containerMap.get(hoveredPlacement.containerId) : undefined;
   const hoveredPort = hoveredContainer ? portMap.get(hoveredContainer.portCode) : undefined;
+  const hoveredBay = hoveredSlot ? bays.find((bay) => bay.id === hoveredSlot.bayId) : undefined;
 
   return (
     <div className="bay-canvas-shell">
@@ -323,9 +353,15 @@ export const BayCanvas = forwardRef<BayCanvasHandle, BayCanvasProps>(function Ba
             {hoveredContainer ? (
               <span>
                 {hoveredContainer.number} · {hoveredContainer.grossWeight.toFixed(2)} t · {hoveredPort?.name} · {hoveredContainer.type}
+                {hoveredContainer.reefer ? ' · 已接插供电' : ''}
               </span>
             ) : (
-              <span>空格位 · 可接收集装箱</span>
+              <span>
+                空格位 · 可接收集装箱
+                {hoveredBay
+                  ? ` · 该贝插口 ${reeferUsageByBay.get(hoveredBay.id) ?? 0}/${baySocketCapacity(hoveredBay)}`
+                  : ''}
+              </span>
             )}
           </>
         ) : (
